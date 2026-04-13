@@ -731,7 +731,8 @@ int main(int argc, char **argv) {
     files = {env_p};
   }
 
-  Config config = parseConfig("/home/alan/projects/cora/examples/config.json");
+  Config config = parseConfig("/home/joshua/Packages/cora/examples/config.json");
+  files = config.files;
 
   for (auto file : files) {
     CORA::Matrix soln = solveProblem(

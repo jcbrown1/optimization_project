@@ -39,7 +39,6 @@ set(EXAMPLE_PYFG_FILES
 "data/plaza2.pyfg"
 "data/single_drone.pyfg"
 "data/tiers.pyfg"
-"data/outlier/factor_graph_small_outlier.pyfg"
 )
 
 message(STATUS "Building main cora_example command-line executable in directory ${EXECUTABLE_OUTPUT_PATH}\n")

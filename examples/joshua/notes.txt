@@ -1,0 +1,30 @@
+### To include cstdint manually
+cmake -DCMAKE_CXX_FLAGS="-include cstdint" ..
+### To include cstdint manually and the path of the tonioviz build (can't install for some reason)
+cmake .. \
+  -DCMAKE_CXX_FLAGS="-I/home/joshua/Packages/tonioviz/include" \
+  -DCMAKE_EXE_LINKER_FLAGS="-L/home/joshua/Packages/tonioviz/build -ltonioviz" \
+  -DCMAKE_CXX_FLAGS="-include cstdint"
+    cmake .. \
+    -DCMAKE_PREFIX_PATH="/home/joshua/Packages/tonioviz/build" \
+    -DCMAKE_CXX_FLAGS="-I/home/joshua/Packages/tonioviz/include -I/usr/include/eigen3 -I/usr/include/opencv4 -include cstdint"
+
+
+
+### Build GTSAM
+
+### Build Pangolin
+
+### Build tonioviz (Should get pulled in by cora)
+
+### Build cora
+mkdir -p ~/Packages/cora/build && \
+  cd ~/Packages/cora/build && \
+  cmake -S .. -B . \
+  -DCMAKE_CXX_FLAGS="-include cstdint" && \
+  cmake --build . -j
+
+
+# If you get this error when running `./build/bin/tests` 
+./build/bin/tests: error while loading shared libraries: libpango_windowing.so: cannot open shared object file: No such file or directory
+export LD_LIBRARY_PATH=/home/joshua/Packages/Pangolin/build/:$LD_LIBRARY_PATH

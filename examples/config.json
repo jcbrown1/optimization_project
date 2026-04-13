@@ -7,5 +7,5 @@
   "preconditioner": "RegularizedCholesky",
   "formulation": "Implicit",
   "init_type": "Random",
-  "files": ["data/test.pyfg"]
+  "files": ["data/plaza2.pyfg"] 
 }

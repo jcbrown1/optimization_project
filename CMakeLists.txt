@@ -33,7 +33,7 @@ set(ENABLE_VECTORIZATION ON CACHE BOOL "Enable vectorized instruction sets (SIMD
 # Enable code profiling using gperftools
 set(ENABLE_PROFILING OFF CACHE BOOL "Enable code profiling using gperftools")
 # Enable visualization module.
-set(ENABLE_VISUALIZATION OFF CACHE BOOL "Enable visualization module.")
+set(ENABLE_VISUALIZATION ON CACHE BOOL "Enable visualization module.")
 # Run the experiments from the paper
 set(PERFORM_EXPERIMENTS ON CACHE BOOL "Run the experiments from the paper.")
 # Build C++ examples
@@ -157,6 +157,8 @@ target_link_libraries(${PROJECT_NAME} PUBLIC ILDL ${SPQR_LIBRARIES} ${BLAS_LIBRA
 if (${ENABLE_VISUALIZATION})
     target_include_directories(${PROJECT_NAME} PUBLIC ${TONIOVIZ_INCLUDE_DIRS})
     target_link_libraries(${PROJECT_NAME} PUBLIC tonioviz)
+    # Joshua
+    target_compile_definitions(CORA PUBLIC ENABLE_VISUALIZATION)
 endif()
 
 # If python bindings are enabled, set warning that this is not implemented yet

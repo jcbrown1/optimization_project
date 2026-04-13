@@ -9,9 +9,14 @@
 
 #include <thread> // NOLINT [build/c++11]
 
-int main() {
+int main(int argc, char **argv) {
+  if (argc != 2) {
+    std::cout << "Usage: " << argv[0] << " [input .g2o file]" << std::endl;
+    exit(1);
+  }
   CORA::Problem problem =
-      CORA::parsePyfgTextToProblem("./bin/data/factor_graph_small.pyfg");
+      // CORA::parsePyfgTextToProblem("./bin/example_data/factor_graph.pyfg");
+      CORA::parsePyfgTextToProblem(argv[1]);
   // "./bin/data/plaza2.pyfg");
   problem.updateProblemData();
 
