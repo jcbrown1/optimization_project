@@ -7,13 +7,12 @@ you want to really inspect your odometry data/calibration.
 """
 
 from py_factor_graph.io.pyfg_text import read_from_pyfg_text
-from py_factor_graph.calibrations.range_measurement_calibration import (
-    calibrate_range_measures,
-)
 from py_factor_graph.calibrations.odom_measurement_calibration import (
     calibrate_odom_measures,
 )
+import matplotlib.pyplot as plt
 import os
+import math
 
 
 def _get_pyfg_files_in_dir(dir_path):
@@ -58,12 +57,66 @@ def _visualize_dataset(
 
 
 def _visualize_range_errors(fg):
-    calibrate_range_measures(fg, show_outlier_rejection=True)
+    variable_positions = fg.variable_true_positions_dict
+    assoc_to_true = {}
+    assoc_to_measured = {}
+
+    for measure in fg.range_measurements:
+        key_a, key_b = measure.association
+        if key_a not in variable_positions or key_b not in variable_positions:
+            continue
+
+        pos_a = variable_positions[key_a]
+        pos_b = variable_positions[key_b]
+        true_dist = math.dist(pos_a, pos_b)
+        measured_dist = float(measure.dist)
+
+        assoc = (key_a, key_b)
+        if assoc not in assoc_to_true:
+            assoc_to_true[assoc] = []
+            assoc_to_measured[assoc] = []
+        assoc_to_true[assoc].append(true_dist)
+        assoc_to_measured[assoc].append(measured_dist)
+
+    if len(assoc_to_true) == 0:
+        print("No valid range measurements found to plot.")
+        return
+
+    all_true = [d for values in assoc_to_true.values() for d in values]
+    all_measured = [d for values in assoc_to_measured.values() for d in values]
+    all_residuals = [m - t for m, t in zip(all_measured, all_true)]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    scatter_ax, residual_ax = axes
+
+    for assoc, true_vals in assoc_to_true.items():
+        measured_vals = assoc_to_measured[assoc]
+        label = f"{assoc[0]}-{assoc[1]}"
+        scatter_ax.scatter(true_vals, measured_vals, s=16, alpha=0.7, label=label)
+
+    min_val = min(min(all_true), min(all_measured))
+    max_val = max(max(all_true), max(all_measured))
+    scatter_ax.plot([min_val, max_val], [min_val, max_val], "k--", linewidth=1)
+    scatter_ax.set_title("Range Measurements vs Ground Truth")
+    scatter_ax.set_xlabel("Ground truth range")
+    scatter_ax.set_ylabel("Measured range")
+    if len(assoc_to_true) <= 12:
+        scatter_ax.legend(loc="best", fontsize=8)
+    scatter_ax.grid(True, alpha=0.25)
+
+    residual_ax.scatter(all_true, all_residuals, s=12, alpha=0.6)
+    residual_ax.axhline(0.0, color="k", linestyle="--", linewidth=1)
+    residual_ax.set_title("Range Residuals")
+    residual_ax.set_xlabel("Ground truth range")
+    residual_ax.set_ylabel("Measured - ground truth")
+    residual_ax.grid(True, alpha=0.25)
+
+    fig.tight_layout()
+    plt.show(block=True)
 
 
 def _visualize_relative_pose_errors(fg):
     calibrate_odom_measures(fg)
-
 
 if __name__ == "__main__":
     SHOW_GT = True

@@ -1,6 +1,3 @@
-// robust_cora — baseline CORA solve; customize optimization (e.g. TNT / loss)
-// in this file and in src/CORA.cpp as needed.
-
 #include <CORA/CORA.h>
 #include <CORA/CORA_problem.h>
 #include <CORA/CORA_types.h>
@@ -61,14 +58,13 @@ std::filesystem::path find_parent_of_data_dir(
   return {};
 }
 
-/** Same layout as cora_example, but under {@code output/robust/} to avoid clashes. */
-std::filesystem::path output_dir_for_robust_dataset(
+std::filesystem::path output_dir_for_dataset(
     const std::filesystem::path &pyfg_path) {
   std::filesystem::path base = find_parent_of_data_dir(pyfg_path);
   if (base.empty()) {
     base = pyfg_path.lexically_normal().parent_path();
   }
-  return base / "output" / "robust";
+  return base / "output";
 }
 
 void save_solution(const CORA::Problem &problem,
@@ -83,9 +79,9 @@ void save_solution(const CORA::Problem &problem,
        ++robot_index) {
     const PoseChain &robot_pose_chain = robot_pose_chains[robot_index];
     const std::filesystem::path tum_path =
-        output_dir / (stem + "_robust_cora_" + std::to_string(robot_index) + ".tum");
+        output_dir / (stem + "_cora_" + std::to_string(robot_index) + ".tum");
     const std::filesystem::path g2o_path =
-        output_dir / (stem + "_robust_cora_" + std::to_string(robot_index) + ".g2o");
+        output_dir / (stem + "_cora_" + std::to_string(robot_index) + ".g2o");
     CORA::saveSolnToTum(robot_pose_chain, problem, aligned_soln,
                         tum_path.string());
     CORA::saveSolnToG20(robot_pose_chain, problem, aligned_soln,
@@ -108,21 +104,20 @@ int main(int argc, char **argv) {
   problem.updateProblemData();
 
 #ifdef GPERFTOOLS
-  ProfilerStart("robust_cora.prof");
+  ProfilerStart("cora.prof");
 #endif
 
   CORA::Matrix x0 = problem.getRandomInitialGuess();
   int max_rank = 10;
 
-  // Replace / extend this call once you wire in a robust optimizer variant.
   CORA::CoraResult soln = CORA::solveCORA(problem, x0, max_rank);
   CORA::Matrix aligned_soln = problem.alignEstimateToOrigin(
       CORA::projectSolution(problem, soln.first.x, false));
 
-  const std::filesystem::path out_dir = output_dir_for_robust_dataset(pyfg_path);
+  const std::filesystem::path out_dir = output_dir_for_dataset(pyfg_path);
   save_solution(problem, aligned_soln, out_dir, pyfg_path);
 
-  std::cout << "robust_cora solution: " << std::endl;
+  std::cout << "Solution: " << std::endl;
   std::cout << aligned_soln << std::endl;
 
 #ifdef GPERFTOOLS

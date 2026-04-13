@@ -1,5 +1,8 @@
-add_executable(cora_example main.cpp)
+add_executable(cora_example cora_example.cpp)
 target_link_libraries(cora_example CORA)
+
+add_executable(robust_cora main.cpp)
+target_link_libraries(robust_cora CORA)
 
 if(${ENABLE_VISUALIZATION})
   message(STATUS "Building CORAVis example")
@@ -10,6 +13,8 @@ endif()
 if(${ENABLE_PROFILING})
   target_compile_definitions(cora_example PRIVATE GPERFTOOLS)
   target_link_libraries(cora_example profiler)
+  target_compile_definitions(robust_cora PRIVATE GPERFTOOLS)
+  target_link_libraries(robust_cora profiler)
 endif()
 
 if(${PERFORM_EXPERIMENTS})
@@ -39,12 +44,19 @@ set(EXAMPLE_PYFG_FILES
 "data/plaza2.pyfg"
 "data/single_drone.pyfg"
 "data/tiers.pyfg"
-"data/outlier/factor_graph_small_outlier.pyfg"
 )
 
-message(STATUS "Building main cora_example command-line executable in directory ${EXECUTABLE_OUTPUT_PATH}\n")
+# Optional: any generated/corrupted datasets under data/ (e.g. plaza2_corrupted_0.10_uniform.pyfg)
+file(GLOB EXAMPLE_CORRUPTED_PYFG
+  LIST_DIRECTORIES false
+  RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+  CONFIGURE_DEPENDS
+  "data/*corrupted*.pyfg"
+)
+
+message(STATUS "Building cora_example and robust_cora in ${EXECUTABLE_OUTPUT_PATH}\n")
 
 ## Copy example PyFG files to build directory
-foreach(PYFG_FILE ${EXAMPLE_PYFG_FILES})
+foreach(PYFG_FILE ${EXAMPLE_PYFG_FILES} ${EXAMPLE_CORRUPTED_PYFG})
     configure_file(${PYFG_FILE} ${EXECUTABLE_OUTPUT_PATH}/${PYFG_FILE} COPYONLY)
 endforeach()

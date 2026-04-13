@@ -43,3 +43,9 @@ build*/
 
 # Environment
 env/
+
+# Python
+__pycache__/
+
+# Results
+outputs/
