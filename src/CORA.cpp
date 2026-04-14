@@ -4,6 +4,11 @@
 #include <Optimization/Base/Concepts.h>
 #include <Optimization/Riemannian/TNT.h>
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <numeric>
+
 void printIfVerbose(bool verbose, std::string msg) {
   if (verbose) {
     std::cout << msg << std::endl;
@@ -20,6 +25,121 @@ CORA::Scalar thresholdVal(CORA::Scalar val, CORA::Scalar lower_bound,
     return val;
   }
 }
+
+namespace {
+
+void validateGncParams(const CORA::GncParams &params) {
+  if (params.c_bar <= 0.0) {
+    throw std::invalid_argument("GNC c_bar must be > 0");
+  }
+  if (params.mu_init < 1.0) {
+    throw std::invalid_argument("GNC mu_init must be >= 1");
+  }
+  if (params.mu_min < 1.0) {
+    throw std::invalid_argument("GNC mu_min must be >= 1");
+  }
+  if (params.mu_factor <= 0.0 || params.mu_factor > 1.0) {
+    throw std::invalid_argument("GNC mu_factor must lie in (0, 1]");
+  }
+  if (params.max_outer_iters <= 0 || params.max_inner_iters <= 0) {
+    throw std::invalid_argument(
+        "GNC max_outer_iters and max_inner_iters must be positive");
+  }
+  if (params.weight_tol < 0.0) {
+    throw std::invalid_argument("GNC weight_tol must be >= 0");
+  }
+  if (params.min_weight < 0.0 || params.min_weight > 1.0) {
+    throw std::invalid_argument("GNC min_weight must lie in [0, 1]");
+  }
+  if (params.max_relaxation_rank <= 0) {
+    throw std::invalid_argument("GNC max_relaxation_rank must be positive");
+  }
+}
+
+CORA::Matrix getExplicitEstimateForRangeResiduals(const CORA::Problem &problem,
+                                                  const CORA::Matrix &Y) {
+  if (problem.getFormulation() == CORA::Formulation::Implicit) {
+    if (Y.cols() == problem.dim()) {
+      // getTranslationExplicitSolution validates det(R)=1 only at rank d. For
+      // robust residual evaluation we only need translation/range rows, so lift
+      // by one zero column to bypass this strict rank-d determinant check.
+      CORA::Matrix lifted = CORA::Matrix::Zero(Y.rows(), Y.cols() + 1);
+      lifted.leftCols(Y.cols()) = Y;
+      return problem.getTranslationExplicitSolution(lifted);
+    }
+    return problem.getTranslationExplicitSolution(Y);
+  }
+  return Y;
+}
+
+std::vector<CORA::Scalar>
+computeSquaredRangeResiduals(const CORA::Problem &problem,
+                             const CORA::Matrix &Y_explicit) {
+  checkMatrixShape("computeSquaredRangeResiduals::Y_explicit",
+                   problem.getDataMatrixSize(), Y_explicit.cols(),
+                   Y_explicit.rows(), Y_explicit.cols());
+
+  const auto range_measurements = problem.getRangeMeasurements();
+  const auto rot_mat_sz = problem.numPosesDim();
+  std::vector<CORA::Scalar> sq_residuals(range_measurements.size(), 0.0);
+
+  for (size_t k = 0; k < range_measurements.size(); ++k) {
+    const auto &measurement = range_measurements[k];
+    const CORA::Index first_trans_idx =
+        problem.getTranslationIdx(measurement.first_id);
+    const CORA::Index second_trans_idx =
+        problem.getTranslationIdx(measurement.second_id);
+
+    const CORA::Vector t_diff =
+        (Y_explicit.row(second_trans_idx) - Y_explicit.row(first_trans_idx))
+            .transpose();
+    const CORA::Vector u_ij = Y_explicit.row(rot_mat_sz + static_cast<int>(k))
+                                  .transpose();
+    const CORA::Vector range_residual = t_diff - measurement.r * u_ij;
+    sq_residuals[k] = measurement.getPrecision() * range_residual.squaredNorm();
+  }
+
+  return sq_residuals;
+}
+
+// weights for Geman-McClure (GM) robustification
+std::vector<CORA::Scalar>
+computeGmWeights(const std::vector<CORA::Scalar> &sq_residuals, CORA::Scalar mu,
+                 const CORA::GncParams &params) {
+  const CORA::Scalar c_sq = params.c_bar * params.c_bar;
+  std::vector<CORA::Scalar> weights(sq_residuals.size(), 1.0);
+  for (size_t i = 0; i < sq_residuals.size(); ++i) {
+    const CORA::Scalar numerator = mu * c_sq;
+    const CORA::Scalar denom = sq_residuals[i] + numerator;
+    CORA::Scalar w = 1.0;
+    if (denom > 0.0) {
+      const CORA::Scalar frac = numerator / denom;
+      w = frac * frac;
+    }
+    weights[i] = thresholdVal(w, params.min_weight, 1.0);
+  }
+  return weights;
+}
+
+void fillWeightStats(CORA::GncStageStats &stats,
+                     const std::vector<CORA::Scalar> &weights) {
+  if (weights.empty()) {
+    stats.min_weight = 1.0;
+    stats.mean_weight = 1.0;
+    stats.max_weight = 1.0;
+    return;
+  }
+
+  const auto [min_it, max_it] =
+      std::minmax_element(weights.begin(), weights.end());
+  stats.min_weight = *min_it;
+  stats.max_weight = *max_it;
+  const CORA::Scalar weight_sum =
+      std::accumulate(weights.begin(), weights.end(), 0.0);
+  stats.mean_weight = weight_sum / static_cast<CORA::Scalar>(weights.size());
+}
+
+} // namespace
 
 namespace CORA {
 
@@ -240,6 +360,91 @@ CoraResult solveCORA(Problem &problem, // NOLINT(runtime/references)
                      " and theta: " + std::to_string(cert_results.theta));
 
   return std::make_pair(result, iterates);
+}
+
+RobustCoraResult solveCORAWithGNC(Problem &problem, const Matrix &x0,
+                                  const GncParams &params) {
+  validateGncParams(params);
+
+  if (problem.numRangeMeasurements() == 0) {
+    printIfVerbose(params.verbose,
+                   "No range measurements detected; running nominal CORA.");
+    RobustCoraResult out;
+    out.result = solveCORA(problem, x0, params.max_relaxation_rank,
+                           params.verbose, params.log_iterates,
+                           params.show_iterates);
+    out.total_weighted_solves = 1;
+    return out;
+  }
+
+  std::vector<Scalar> weights(problem.numRangeMeasurements(), 1.0);
+  problem.setRangeWeights(weights);
+
+  Matrix warm_start = x0;
+  RobustCoraResult robust_result;
+
+  // We use CORA as the inner weighted solver and GNC as a nonconvex continuation
+  // outer loop. This does not imply the same global-certification guarantees as
+  // nominal CORA for the final robust objective.
+  Scalar mu = std::max(params.mu_init, params.mu_min);
+  const Scalar mu_eps = 1e-12;
+
+  for (int outer_iter = 0; outer_iter < params.max_outer_iters; ++outer_iter) {
+    GncStageStats stage_stats;
+    stage_stats.mu = mu;
+
+    for (int inner_iter = 0; inner_iter < params.max_inner_iters; ++inner_iter) {
+      problem.setRangeWeights(weights);
+      problem.updateProblemData();
+
+      robust_result.result =
+          solveCORA(problem, warm_start, params.max_relaxation_rank,
+                    params.verbose, params.log_iterates, params.show_iterates);
+      robust_result.total_weighted_solves += 1;
+
+      warm_start = robust_result.result.first.x;
+
+      const Matrix explicit_estimate =
+          getExplicitEstimateForRangeResiduals(problem, warm_start);
+      const std::vector<Scalar> sq_residuals =
+          computeSquaredRangeResiduals(problem, explicit_estimate);
+      const std::vector<Scalar> updated_weights =
+          computeGmWeights(sq_residuals, mu, params);
+
+      Scalar max_weight_delta = 0.0;
+      for (size_t i = 0; i < weights.size(); ++i) {
+        max_weight_delta =
+            std::max(max_weight_delta, std::abs(updated_weights[i] - weights[i]));
+      }
+      weights = updated_weights;
+
+      stage_stats.inner_iterations = inner_iter + 1;
+      stage_stats.max_weight_delta = max_weight_delta;
+      fillWeightStats(stage_stats, weights);
+
+      if (max_weight_delta <= params.weight_tol) {
+        break;
+      }
+    }
+
+    robust_result.stage_stats.push_back(stage_stats);
+
+    if (mu <= params.mu_min + mu_eps) {
+      break;
+    }
+
+    const Scalar next_mu = std::max(params.mu_min, params.mu_factor * mu);
+    if (std::abs(next_mu - mu) < mu_eps) {
+      break;
+    }
+    mu = next_mu;
+  }
+
+  robust_result.final_range_weights = weights;
+  problem.setRangeWeights(weights);
+  problem.updateProblemData();
+
+  return robust_result;
 }
 
 Matrix saddleEscape(const Problem &problem, const Matrix &Y, Scalar theta,

@@ -15,6 +15,7 @@ add_executable(tests
     test_cora.cpp
     test_optimizer_helpers.cpp
     test_certification.cpp
+    test_robust_gnc.cpp
 )
 
 message(STATUS "Building test command-line executable in directory ${EXECUTABLE_OUTPUT_PATH}\n")

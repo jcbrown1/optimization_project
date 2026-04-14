@@ -10,6 +10,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <set>
@@ -42,29 +43,17 @@ PoseChains getRobotPoseChains(const CORA::Problem &problem) {
   return robot_pose_chains;
 }
 
-std::filesystem::path find_parent_of_data_dir(
-    const std::filesystem::path &pyfg_path) {
-  std::filesystem::path cur = pyfg_path.lexically_normal().parent_path();
-  while (!cur.empty()) {
-    if (cur.filename() == "data") {
-      return cur.parent_path();
-    }
-    std::filesystem::path parent = cur.parent_path();
-    if (parent == cur) {
-      break;
-    }
-    cur = parent;
+std::filesystem::path getOutputRoot() {
+  if (const char *env = std::getenv("CORA_OUTPUT_ROOT")) {
+    return std::filesystem::path(env);
   }
-  return {};
+  return std::filesystem::path(CORA_REPO_ROOT) / "outputs";
 }
 
 std::filesystem::path output_dir_for_dataset(
-    const std::filesystem::path &pyfg_path) {
-  std::filesystem::path base = find_parent_of_data_dir(pyfg_path);
-  if (base.empty()) {
-    base = pyfg_path.lexically_normal().parent_path();
-  }
-  return base / "output";
+    const std::filesystem::path &pyfg_path, const std::string &mode) {
+  const std::string dataset_name = pyfg_path.stem().string();
+  return getOutputRoot() / dataset_name / mode;
 }
 
 void save_solution(const CORA::Problem &problem,
@@ -114,7 +103,8 @@ int main(int argc, char **argv) {
   CORA::Matrix aligned_soln = problem.alignEstimateToOrigin(
       CORA::projectSolution(problem, soln.first.x, false));
 
-  const std::filesystem::path out_dir = output_dir_for_dataset(pyfg_path);
+  const std::filesystem::path out_dir =
+      output_dir_for_dataset(pyfg_path, "nominal");
   save_solution(problem, aligned_soln, out_dir, pyfg_path);
 
   std::cout << "Solution: " << std::endl;
