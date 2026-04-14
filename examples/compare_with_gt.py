@@ -7,6 +7,7 @@ import os
 import sys
 import argparse
 import math
+import numpy as np
 import matplotlib.pyplot as plt
 from py_factor_graph.io.pyfg_text import read_from_pyfg_text
 
@@ -222,6 +223,90 @@ def _compute_optimal_solution_loss_placeholder(
     # loss = (current_objective - optimal_objective) / max(optimal_objective, eps)
     _ = optimal_solution  # placeholder for future use
     return proxy_loss
+
+
+def rotation_loss(
+    rotations: dict[int, np.ndarray],
+    pose_edges: list[dict],
+) -> float:
+    """
+    Rotation term:
+    sum_{(i,j) in Ep} kappa_ij * ||R_j - R_i @ R_tilde_ij||_F^2
+    """
+    loss = 0.0
+    for edge in pose_edges:
+        i, j = edge["i"], edge["j"]
+        R_i = rotations[i]
+        R_j = rotations[j]
+        R_tilde = edge["R_tilde"]
+        kappa = edge["kappa"]
+        residual = R_j - R_i @ R_tilde
+        loss += kappa * np.linalg.norm(residual, "fro") ** 2
+    return loss
+
+
+def translation_loss(
+    rotations: dict[int, np.ndarray],
+    translations: dict[int, np.ndarray],
+    pose_edges: list[dict],
+) -> float:
+    """
+    Translation term:
+    sum_{(i,j) in Ep} tau_ij * ||t_j - t_i - R_i @ t_tilde_ij||_2^2
+    """
+    loss = 0.0
+    for edge in pose_edges:
+        i, j = edge["i"], edge["j"]
+        R_i = rotations[i]
+        t_i = translations[i]
+        t_j = translations[j]
+        t_tilde = edge["t_tilde"]
+        tau = edge["tau"]
+        residual = t_j - t_i - R_i @ t_tilde
+        loss += tau * np.linalg.norm(residual) ** 2
+    return loss
+
+
+def range_loss(
+    translations: dict[int, np.ndarray],
+    range_edges: list[dict],
+) -> float:
+    """
+    Range term:
+    sum_{(i,j) in Er} (1/sigma_ij^2) * (||t_j - t_i||_2 - r_tilde_ij)^2
+    """
+    loss = 0.0
+    for edge in range_edges:
+        i, j = edge["i"], edge["j"]
+        t_i = translations[i]
+        t_j = translations[j]
+        r_tilde = edge["r_tilde"]
+        sigma = edge["sigma"]
+        measured_dist = np.linalg.norm(t_j - t_i)
+        residual = measured_dist - r_tilde
+        loss += (1.0 / sigma**2) * residual**2
+    return loss
+
+
+def ra_slam_loss(
+    rotations: dict[int, np.ndarray],
+    translations: dict[int, np.ndarray],
+    pose_edges: list[dict],
+    range_edges: list[dict],
+) -> dict[str, float]:
+    """
+    Full MAP loss for RA-SLAM Problem 1:
+    rotation + translation + range terms.
+    """
+    rot = rotation_loss(rotations, pose_edges)
+    trans = translation_loss(rotations, translations, pose_edges)
+    rng = range_loss(translations, range_edges)
+    return {
+        "rotation": rot,
+        "translation": trans,
+        "range": rng,
+        "total": rot + trans + rng,
+    }
 
 
 def _report_evaluation_metrics(gt_files, cora_solution_files):
