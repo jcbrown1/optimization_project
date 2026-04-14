@@ -47,6 +47,7 @@ void Problem::addRangeMeasurement(const RangeMeasurement &range_measurement) {
     throw std::invalid_argument("Range measurement already exists");
   }
   range_measurements_.push_back(range_measurement);
+  range_weights_.push_back(1.0);
   problem_data_up_to_date_ = false;
   manifolds_.oblique_manifold_.addNewSphere();
 }
@@ -112,6 +113,25 @@ void Problem::addLandmarkPrior(const LandmarkPrior &landmark_prior) {
   }
 }
 
+void Problem::setRangeWeights(const std::vector<Scalar> &range_weights) {
+  if (range_weights.size() != range_measurements_.size()) {
+    throw std::invalid_argument(
+        "Range weights size must match number of range measurements");
+  }
+  for (const Scalar w : range_weights) {
+    if (w < 0.0 || w > 1.0) {
+      throw std::invalid_argument("Range weights must lie in [0, 1]");
+    }
+  }
+  range_weights_ = range_weights;
+  problem_data_up_to_date_ = false;
+}
+
+void Problem::resetRangeWeights() {
+  range_weights_ = std::vector<Scalar>(range_measurements_.size(), 1.0);
+  problem_data_up_to_date_ = false;
+}
+
 void Problem::fillRangeSubmatrices() {
   // need to account for the fact that the indices will be offset by the
   // dimension of the rotation and the range variables that precede the
@@ -131,12 +151,13 @@ void Problem::fillRangeSubmatrices() {
   for (int measure_idx = 0; measure_idx < range_measurements_.size();
        measure_idx++) {
     RangeMeasurement measure = range_measurements_[measure_idx];
+    const Scalar weight = range_weights_.empty() ? 1.0 : range_weights_[measure_idx];
 
     // update the diagonal matrices
     data_submatrices_.range_dist_matrix.insert(measure_idx, measure_idx) =
         measure.r;
     data_submatrices_.range_precision_matrix.insert(measure_idx, measure_idx) =
-        measure.getPrecision();
+        weight * measure.getPrecision();
 
     // update the incidence matrix
     auto id1 = getTranslationIdx(measure.first_id) - translation_offset;

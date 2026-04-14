@@ -13,6 +13,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <set>
@@ -45,30 +46,17 @@ PoseChains getRobotPoseChains(const CORA::Problem &problem) {
   return robot_pose_chains;
 }
 
-std::filesystem::path find_parent_of_data_dir(
-    const std::filesystem::path &pyfg_path) {
-  std::filesystem::path cur = pyfg_path.lexically_normal().parent_path();
-  while (!cur.empty()) {
-    if (cur.filename() == "data") {
-      return cur.parent_path();
-    }
-    std::filesystem::path parent = cur.parent_path();
-    if (parent == cur) {
-      break;
-    }
-    cur = parent;
+std::filesystem::path getOutputRoot() {
+  if (const char *env = std::getenv("CORA_OUTPUT_ROOT")) {
+    return std::filesystem::path(env);
   }
-  return {};
+  return std::filesystem::path(CORA_REPO_ROOT) / "outputs";
 }
 
-/** Same layout as cora_example, but under {@code output/robust/} to avoid clashes. */
 std::filesystem::path output_dir_for_robust_dataset(
     const std::filesystem::path &pyfg_path) {
-  std::filesystem::path base = find_parent_of_data_dir(pyfg_path);
-  if (base.empty()) {
-    base = pyfg_path.lexically_normal().parent_path();
-  }
-  return base / "output" / "robust";
+  const std::string dataset_name = pyfg_path.stem().string();
+  return getOutputRoot() / dataset_name / "robust";
 }
 
 void save_solution(const CORA::Problem &problem,
@@ -94,6 +82,20 @@ void save_solution(const CORA::Problem &problem,
   std::cout << "Saved solution to " << output_dir.string() << std::endl;
 }
 
+double envToDouble(const char *name, double default_value) {
+  if (const char *env = std::getenv(name)) {
+    return std::stod(env);
+  }
+  return default_value;
+}
+
+int envToInt(const char *name, int default_value) {
+  if (const char *env = std::getenv(name)) {
+    return std::stoi(env);
+  }
+  return default_value;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -114,16 +116,44 @@ int main(int argc, char **argv) {
   CORA::Matrix x0 = problem.getRandomInitialGuess();
   int max_rank = 10;
 
-  // Replace / extend this call once you wire in a robust optimizer variant.
-  CORA::CoraResult soln = CORA::solveCORA(problem, x0, max_rank);
-  CORA::Matrix aligned_soln = problem.alignEstimateToOrigin(
-      CORA::projectSolution(problem, soln.first.x, false));
+  CORA::GncParams gnc_params;
+  gnc_params.c_bar = envToDouble("CORA_GNC_C_BAR", gnc_params.c_bar);
+  gnc_params.mu_init = envToDouble("CORA_GNC_MU_INIT", gnc_params.mu_init);
+  gnc_params.mu_factor = envToDouble("CORA_GNC_MU_FACTOR", gnc_params.mu_factor);
+  gnc_params.mu_min = envToDouble("CORA_GNC_MU_MIN", gnc_params.mu_min);
+  gnc_params.max_outer_iters =
+      envToInt("CORA_GNC_MAX_OUTER_ITERS", gnc_params.max_outer_iters);
+  gnc_params.max_inner_iters =
+      envToInt("CORA_GNC_MAX_INNER_ITERS", gnc_params.max_inner_iters);
+  gnc_params.weight_tol =
+      envToDouble("CORA_GNC_WEIGHT_TOL", gnc_params.weight_tol);
+  gnc_params.min_weight =
+      envToDouble("CORA_GNC_MIN_WEIGHT", gnc_params.min_weight);
+  gnc_params.max_relaxation_rank = max_rank;
+
+  CORA::RobustCoraResult robust_soln =
+      CORA::solveCORAWithGNC(problem, x0, gnc_params);
+  CORA::Matrix projected_soln =
+      CORA::projectSolution(problem, robust_soln.result.first.x, false);
+  CORA::Matrix explicit_soln = projected_soln;
+  if (problem.getFormulation() == CORA::Formulation::Implicit) {
+    explicit_soln = problem.getTranslationExplicitSolution(projected_soln);
+  }
+  CORA::Matrix aligned_soln = problem.alignEstimateToOrigin(explicit_soln);
 
   const std::filesystem::path out_dir = output_dir_for_robust_dataset(pyfg_path);
   save_solution(problem, aligned_soln, out_dir, pyfg_path);
 
-  std::cout << "robust_cora solution: " << std::endl;
-  std::cout << aligned_soln << std::endl;
+  if (!robust_soln.stage_stats.empty()) {
+    const CORA::GncStageStats &last_stage = robust_soln.stage_stats.back();
+    std::cout << "GNC stages: " << robust_soln.stage_stats.size()
+              << ", weighted solves: " << robust_soln.total_weighted_solves
+              << ", final mu: " << last_stage.mu
+              << ", final mean weight: " << last_stage.mean_weight << std::endl;
+  }
+
+  // std::cout << "robust_cora solution: " << std::endl;
+  // std::cout << aligned_soln << std::endl;
 
 #ifdef GPERFTOOLS
   ProfilerStop();

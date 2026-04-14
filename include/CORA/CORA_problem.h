@@ -84,6 +84,8 @@ private:
 
   // the range measurements that are used to construct the problem
   std::vector<RangeMeasurement> range_measurements_;
+  // per-range edge weights for robust range reweighting
+  std::vector<Scalar> range_weights_;
 
   // the relative pose measurements that are used to construct the problem
   std::vector<RelativePoseMeasurement> rel_pose_pose_measurements_;
@@ -260,6 +262,9 @@ public:
   std::vector<RangeMeasurement> getRangeMeasurements() const {
     return range_measurements_;
   }
+  std::vector<Scalar> getRangeWeights() const { return range_weights_; }
+  void setRangeWeights(const std::vector<Scalar> &range_weights);
+  void resetRangeWeights();
 
   // Get copy of relative pose measurements
   inline std::vector<RelativePoseMeasurement> getRPMs() const {

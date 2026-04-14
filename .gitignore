@@ -49,3 +49,6 @@ __pycache__/
 
 # Results
 outputs/
+
+.cursorignore
+.venv/

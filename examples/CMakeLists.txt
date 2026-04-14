@@ -1,8 +1,10 @@
 add_executable(cora_example cora_example.cpp)
 target_link_libraries(cora_example CORA)
+target_compile_definitions(cora_example PRIVATE CORA_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 
 add_executable(robust_cora main.cpp)
 target_link_libraries(robust_cora CORA)
+target_compile_definitions(robust_cora PRIVATE CORA_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 
 if(${ENABLE_VISUALIZATION})
   message(STATUS "Building CORAVis example")
