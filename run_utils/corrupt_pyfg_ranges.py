@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Corrupt EDGE_RANGE measurements in a .pyfg file.
+Corrupt or replace EDGE_RANGE measurements in a .pyfg file.
 
-This script preserves all non-range lines and only edits range values in
-EDGE_RANGE entries according to:
-  1) A per-measurement corruption probability
-  2) A selected outlier model:
-     - uniform: sample a new range inside problem-scale bounds only (from vertex layout + range stats)
-     - realistic: heavy-tailed bias vs robust scale sigma, loose sigma-based clip (not the uniform box)
-     - exponential: occlusion — false range z < r_true from a truncated exponential on [0, r_true]
+This script preserves all non-range lines and edits EDGE_RANGE values with:
+  - uniform: corrupt selected measurements with U(lower, upper)
+  - gamma: corrupt selected measurements with Gamma(k, theta)
+  - student_t_replace: replace all measurements with r_true + Student-t noise
+
+Ground-truth support:
+  - Optional zero-error export writes EDGE_RANGE = geometric range from input vertices.
+  - Student-t replacement uses input vertices as ground truth.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import argparse
 import math
 import random
 from pathlib import Path
-from statistics import median
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
@@ -26,7 +26,7 @@ Point = Tuple[float, ...]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Corrupt EDGE_RANGE measurements in a .pyfg file."
+        description="Corrupt or replace EDGE_RANGE measurements in a .pyfg file."
     )
     parser.add_argument(
         "--input",
@@ -34,19 +34,60 @@ def parse_args() -> argparse.Namespace:
         help="Input .pyfg file path.",
     )
     parser.add_argument(
-        "--probability",
-        type=float,
-        required=True,
-        help="Probability (0..1) that an EDGE_RANGE measurement is corrupted.",
-    )
-    parser.add_argument(
         "--method",
-        choices=("uniform", "realistic", "exponential"),
+        choices=("uniform", "gamma", "student_t_replace"),
         required=True,
         help=(
-            "uniform: U(lower,upper) from problem-scale bounds only; "
-            "realistic: heavy-tailed NLOS bias with sigma-based clip (not the uniform box); "
-            "exponential: occlusion — truncated Exp on [0,r_true] (measured range < true range)."
+            "uniform: U(lower,upper) for selected measurements; "
+            "gamma: Gamma(k,theta) for selected measurements; "
+            "student_t_replace: replace all ranges using GT + Student-t noise."
+        ),
+    )
+    parser.add_argument(
+        "--probability",
+        type=float,
+        default=1.0,
+        help=(
+            "Probability (0..1) that an EDGE_RANGE measurement is edited. "
+            "Used for uniform/gamma; ignored by student_t_replace."
+        ),
+    )
+    parser.add_argument(
+        "--k",
+        type=float,
+        default=None,
+        help="Gamma shape parameter k (required when --method gamma).",
+    )
+    parser.add_argument(
+        "--theta",
+        type=float,
+        default=None,
+        help="Gamma scale parameter theta (required when --method gamma).",
+    )
+    parser.add_argument(
+        "--student-dof",
+        type=float,
+        default=None,
+        help="Student-t degrees of freedom (required for student_t_replace).",
+    )
+    parser.add_argument(
+        "--student-scale",
+        type=float,
+        default=None,
+        help="Student-t scale (required for student_t_replace).",
+    )
+    parser.add_argument(
+        "--student-loc",
+        type=float,
+        default=0.0,
+        help="Student-t location (default 0.0).",
+    )
+    parser.add_argument(
+        "--write-zero-error",
+        action="store_true",
+        help=(
+            "Also write a *_zero_error.pyfg file where each EDGE_RANGE equals "
+            "the geometric range from input vertices."
         ),
     )
     parser.add_argument(
@@ -72,18 +113,6 @@ def _parse_vertex_point(tokens: Sequence[str]) -> Optional[Tuple[str, Point]]:
     return None
 
 
-def _robust_scale(values: Sequence[float]) -> float:
-    if not values:
-        return 1.0
-    med = median(values)
-    deviations = [abs(v - med) for v in values]
-    mad = median(deviations)
-    sigma = 1.4826 * mad
-    if sigma <= 1e-12:
-        sigma = max(med * 0.05, 0.5)
-    return sigma
-
-
 def collect_vertex_points(lines: Sequence[str]) -> Dict[str, Point]:
     points: Dict[str, Point] = {}
     for line in lines:
@@ -98,31 +127,21 @@ def collect_vertex_points(lines: Sequence[str]) -> Dict[str, Point]:
     return points
 
 
-def compute_uniform_bounds(
-    lines: Sequence[str], ranges: Sequence[float]
+def compute_uniform_bounds_from_true_ranges(
+    true_ranges_by_line: Optional[Dict[int, float]], measured_ranges: Sequence[float]
 ) -> Tuple[float, float]:
-    max_range = max(ranges) if ranges else 1.0
-    min_range = min(ranges) if ranges else 0.1
-
-    points = collect_vertex_points(lines)
-
-    if points:
-        dims = max(len(p) for p in points.values())
-        mins = [
-            min(p[i] for p in points.values() if i < len(p))
-            for i in range(dims)
-        ]
-        maxs = [
-            max(p[i] for p in points.values() if i < len(p))
-            for i in range(dims)
-        ]
-        diag = math.sqrt(sum((maxs[i] - mins[i]) ** 2 for i in range(len(mins))))
-        problem_scale = max(diag, max_range, 1.0)
+    if true_ranges_by_line and len(true_ranges_by_line) > 0:
+        true_vals = list(true_ranges_by_line.values())
+        lower = min(true_vals)
+        upper = max(true_vals)
+    elif measured_ranges:
+        lower = min(measured_ranges)
+        upper = max(measured_ranges)
     else:
-        problem_scale = max(max_range, 1.0)
+        lower, upper = 0.0, 1.0
 
-    lower = max(0.0, min(min_range * 0.25, problem_scale * 0.05))
-    upper = max(max_range * 1.25, problem_scale * 1.25, lower + 1e-6)
+    if upper <= lower:
+        upper = lower + 1e-6
     return lower, upper
 
 
@@ -131,78 +150,41 @@ def _euclidean_distance(a: Point, b: Point) -> float:
     return math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(dim)))
 
 
-def sample_truncated_exponential_below_true(r_true: float, lam: float) -> float:
-    """Sample z from the truncated distribution p(z) ∝ λ exp(−λ z) on z ∈ [0, r_true].
-
-    Models an early return from an unexpected obstacle: the reported range z is
-    always at most the geometric true range r_true, with smaller z more likely
-    when λ is larger (closer occlusions more probable).
-    """
-    r_true = max(float(r_true), 1e-12)
-    if lam <= 0.0:
-        lam = 1.0 / r_true
-    u = random.random()
-    u = min(max(u, 1e-15), 1.0 - 1e-15)
-    exp_m = math.exp(-lam * r_true)
-    z = -math.log(1.0 - u * (1.0 - exp_m)) / lam
-    return min(z, r_true)
+def sample_gamma_outlier(k: float, theta: float) -> float:
+    g = random.gammavariate(k, theta)
+    return g - k * theta  # center to zero mean
 
 
-def generate_uniform_outlier(lower: float, upper: float) -> float:
-    return random.uniform(lower, upper)
+def sample_student_t(dof: float, loc: float, scale: float) -> float:
+    z = random.gauss(0.0, 1.0)
+    chi_sq = random.gammavariate(dof / 2.0, 2.0)
+    t = z / math.sqrt(chi_sq / dof)
+    return loc + scale * t
 
 
-def generate_realistic_outlier(original: float, sigma: float) -> float:
-    """Heavy-tailed NLOS-style bias; clipped only by a loose sigma-based band."""
-    floor = max(1e-9, original * 0.01)
-    upper = original + 30.0 * max(sigma, original * 0.02, 0.1)
-    tail = abs(random.gauss(0.0, 1.0) / math.sqrt(random.uniform(1e-6, 1.0)))
-    bias = sigma * (2.0 + tail)
-    if random.random() < 0.8:
-        corrupted = original + bias
-    else:
-        corrupted = original - 0.5 * bias
-    return min(max(corrupted, floor), upper)
-
-
-def generate_exponential_occlusion(r_true: float, sigma: float) -> float:
-    """Occlusion: measured range z < r_true with p(z) ∝ λ exp(−λ z) on [0, r_true].
-
-    Rate λ is set from the robust range scale σ so closer false returns are more
-    likely than far ones (λ larger → typical z smaller).
-    """
-    r_true = max(float(r_true), 1e-12)
-    mean_free = max(sigma, 0.05 * r_true, 0.5)
-    lam = 1.0 / mean_free
-    return sample_truncated_exponential_below_true(r_true, lam)
-
-
-def corrupt_ranges(
-    lines: Sequence[str],
-    probability: float,
-    method: str,
-) -> Tuple[List[str], int, int]:
-    range_values: List[float] = []
-    for line in lines:
+def compute_true_ranges_by_line(
+    lines: Sequence[str], gt_points: Dict[str, Point]
+) -> Dict[int, float]:
+    true_ranges: Dict[int, float] = {}
+    for idx, line in enumerate(lines):
         tokens = line.strip().split()
-        if tokens and tokens[0] == "EDGE_RANGE" and len(tokens) >= 6:
-            range_values.append(float(tokens[4]))
+        if not tokens or tokens[0] != "EDGE_RANGE" or len(tokens) < 6:
+            continue
+        sym_a, sym_b = tokens[2], tokens[3]
+        if sym_a not in gt_points or sym_b not in gt_points:
+            continue
+        true_ranges[idx] = _euclidean_distance(gt_points[sym_a], gt_points[sym_b])
+    return true_ranges
 
-    sigma = _robust_scale(range_values)
-    uniform_lower: Optional[float] = None
-    uniform_upper: Optional[float] = None
-    if method == "uniform":
-        uniform_lower, uniform_upper = compute_uniform_bounds(lines, range_values)
 
-    vertex_points: Dict[str, Point] = {}
-    if method == "exponential":
-        vertex_points = collect_vertex_points(lines)
-
+def rewrite_with_true_ranges(
+    lines: Sequence[str], true_ranges: Dict[int, float]
+) -> Tuple[List[str], int, int]:
     output_lines: List[str] = []
     total_ranges = 0
-    changed_ranges = 0
+    rewritten = 0
 
-    for line in lines:
+    for idx, line in enumerate(lines):
         raw = line.rstrip("\n")
         tokens = raw.split()
         if not tokens or tokens[0] != "EDGE_RANGE" or len(tokens) < 6:
@@ -210,7 +192,59 @@ def corrupt_ranges(
             continue
 
         total_ranges += 1
-        if random.random() >= probability:
+        if idx not in true_ranges:
+            output_lines.append(raw)
+            continue
+
+        timestamp, sym_a, sym_b = tokens[1], tokens[2], tokens[3]
+        covariance = tokens[5]
+        new_range = max(0.0, true_ranges[idx])
+        output_lines.append(
+            f"EDGE_RANGE {timestamp} {sym_a} {sym_b} {new_range:.9f} {covariance}"
+        )
+        rewritten += 1
+
+    return output_lines, total_ranges, rewritten
+
+
+def transform_ranges(
+    lines: Sequence[str],
+    probability: float,
+    method: str,
+    k: Optional[float],
+    theta: Optional[float],
+    true_ranges_by_line: Optional[Dict[int, float]],
+    student_dof: Optional[float],
+    student_scale: Optional[float],
+    student_loc: float,
+) -> Tuple[List[str], int, int]:
+    range_values: List[float] = []
+    for line in lines:
+        tokens = line.strip().split()
+        if tokens and tokens[0] == "EDGE_RANGE" and len(tokens) >= 6:
+            range_values.append(float(tokens[4]))
+
+    uniform_lower: Optional[float] = None
+    uniform_upper: Optional[float] = None
+    if method == "uniform":
+        uniform_lower, uniform_upper = compute_uniform_bounds_from_true_ranges(
+            true_ranges_by_line, range_values
+        )
+
+    replace_all = method == "student_t_replace"
+    output_lines: List[str] = []
+    total_ranges = 0
+    changed_ranges = 0
+
+    for idx, line in enumerate(lines):
+        raw = line.rstrip("\n")
+        tokens = raw.split()
+        if not tokens or tokens[0] != "EDGE_RANGE" or len(tokens) < 6:
+            output_lines.append(raw)
+            continue
+
+        total_ranges += 1
+        if (not replace_all) and random.random() >= probability:
             output_lines.append(raw)
             continue
 
@@ -220,57 +254,123 @@ def corrupt_ranges(
 
         if method == "uniform":
             assert uniform_lower is not None and uniform_upper is not None
-            new_range = generate_uniform_outlier(uniform_lower, uniform_upper)
-        elif method == "realistic":
-            new_range = generate_realistic_outlier(original_range, sigma)
-        else:
-            assert method == "exponential"
-            if sym_a in vertex_points and sym_b in vertex_points:
-                r_true = _euclidean_distance(
-                    vertex_points[sym_a], vertex_points[sym_b]
-                )
+            new_range = random.uniform(uniform_lower, uniform_upper)
+        elif method == "gamma":
+            assert k is not None and theta is not None
+            # Gamma samples the corruption error, not the full measurement.
+            gamma_error = sample_gamma_outlier(k, theta)
+            if true_ranges_by_line is not None and idx in true_ranges_by_line:
+                baseline = true_ranges_by_line[idx]
             else:
-                r_true = original_range
-            new_range = generate_exponential_occlusion(r_true, sigma)
+                baseline = original_range
+            new_range = max(0.0, baseline + gamma_error)
+        else:
+            assert method == "student_t_replace"
+            assert true_ranges_by_line is not None
+            assert student_dof is not None and student_scale is not None
+            if idx not in true_ranges_by_line:
+                output_lines.append(raw)
+                continue
+            true_range = true_ranges_by_line[idx]
+            noise = sample_student_t(student_dof, student_loc, student_scale)
+            new_range = max(0.0, true_range + noise)
 
-        new_line = (
-            f"EDGE_RANGE {timestamp} {sym_a} {sym_b} "
-            f"{new_range:.9f} {covariance}"
+        output_lines.append(
+            f"EDGE_RANGE {timestamp} {sym_a} {sym_b} {new_range:.9f} {covariance}"
         )
-        output_lines.append(new_line)
         changed_ranges += 1
 
     return output_lines, total_ranges, changed_ranges
 
 
-def main() -> None:
-    args = parse_args()
-
+def _validate_args(args: argparse.Namespace) -> None:
     if not 0.0 <= args.probability <= 1.0:
         raise ValueError("--probability must be in [0, 1].")
+
+    if args.method == "gamma":
+        if args.k is None or args.theta is None:
+            raise ValueError("--k and --theta are required when --method gamma.")
+        if args.k <= 0.0:
+            raise ValueError("--k must be > 0 for gamma distribution.")
+        if args.theta <= 0.0:
+            raise ValueError("--theta must be > 0 for gamma distribution.")
+
+    if args.method == "student_t_replace":
+        if args.student_dof is None or args.student_scale is None:
+            raise ValueError(
+                "--student-dof and --student-scale are required for --method student_t_replace."
+            )
+        if args.student_dof <= 0.0:
+            raise ValueError("--student-dof must be > 0.")
+        if args.student_scale <= 0.0:
+            raise ValueError("--student-scale must be > 0.")
+
+
+def _method_suffix(args: argparse.Namespace) -> str:
+    if args.method == "gamma":
+        return f"gamma_k{args.k:g}_theta{args.theta:g}"
+    if args.method == "student_t_replace":
+        return (
+            f"student_t_replace_dof{args.student_dof:g}"
+            f"_scale{args.student_scale:g}_loc{args.student_loc:g}"
+        )
+    return args.method
+
+
+def main() -> None:
+    args = parse_args()
+    _validate_args(args)
 
     if args.seed is not None:
         random.seed(args.seed)
 
     in_path = Path(args.input)
-    out_path_root = in_path.parent
-    out_path = out_path_root / in_path.name.replace(".pyfg", f"_corrupted_{args.probability:.4f}_{args.method}.pyfg")
-
     if in_path.suffix != ".pyfg":
         raise ValueError("Input file must have .pyfg extension.")
     if not in_path.exists():
         raise FileNotFoundError(f"Input file does not exist: {in_path}")
 
+    out_path_root = in_path.parent
+    out_path = out_path_root / in_path.name.replace(
+        ".pyfg", f"_corrupted_{args.probability:.4f}_{_method_suffix(args)}.pyfg"
+    )
+
     lines = in_path.read_text(encoding="utf-8").splitlines()
-    corrupted_lines, total, changed = corrupt_ranges(
-        lines=lines, probability=args.probability, method=args.method
+
+    gt_points = collect_vertex_points(lines)
+    true_ranges_by_line: Optional[Dict[int, float]] = compute_true_ranges_by_line(
+        lines, gt_points
+    )
+
+    if args.write_zero_error:
+        zero_lines, zero_total, zero_written = rewrite_with_true_ranges(
+            lines, true_ranges_by_line
+        )
+        zero_path = out_path_root / in_path.name.replace(".pyfg", "_zero_error.pyfg")
+        zero_path.write_text("\n".join(zero_lines) + "\n", encoding="utf-8")
+        print(
+            f"Wrote {zero_path} with {zero_written}/{zero_total} EDGE_RANGE "
+            "measurements replaced by geometric ranges from input vertices."
+        )
+
+    transformed_lines, total, changed = transform_ranges(
+        lines=lines,
+        probability=args.probability,
+        method=args.method,
+        k=args.k,
+        theta=args.theta,
+        true_ranges_by_line=true_ranges_by_line,
+        student_dof=args.student_dof,
+        student_scale=args.student_scale,
+        student_loc=args.student_loc,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(corrupted_lines) + "\n", encoding="utf-8")
+    out_path.write_text("\n".join(transformed_lines) + "\n", encoding="utf-8")
 
+    operation = "replaced" if args.method == "student_t_replace" else "corrupted"
     print(
-        f"Wrote {out_path} with {changed}/{total} EDGE_RANGE measurements corrupted "
+        f"Wrote {out_path} with {changed}/{total} EDGE_RANGE measurements {operation} "
         f"(method={args.method}, probability={args.probability})."
     )
 

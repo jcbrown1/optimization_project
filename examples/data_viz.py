@@ -85,6 +85,17 @@ def _visualize_range_errors(fg):
     all_true = [d for values in assoc_to_true.values() for d in values]
     all_measured = [d for values in assoc_to_measured.values() for d in values]
     all_residuals = [m - t for m, t in zip(all_measured, all_true)]
+    residual_count = len(all_residuals)
+    residual_mean = sum(all_residuals) / residual_count
+    residual_variance = (
+        sum((r - residual_mean) ** 2 for r in all_residuals) / residual_count
+    )
+
+    print(
+        "Residual stats "
+        f"(measured - ground truth): count={residual_count}, "
+        f"mean={residual_mean:.6f}, variance={residual_variance:.6f}, std={math.sqrt(residual_variance):.6f}"
+    )
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     scatter_ax, residual_ax = axes
@@ -110,6 +121,15 @@ def _visualize_range_errors(fg):
     residual_ax.set_xlabel("Ground truth range")
     residual_ax.set_ylabel("Measured - ground truth")
     residual_ax.grid(True, alpha=0.25)
+    residual_ax.text(
+        0.02,
+        0.98,
+        f"mean={residual_mean:.4f}\nvar={residual_variance:.4f}",
+        transform=residual_ax.transAxes,
+        va="top",
+        ha="left",
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.75},
+    )
 
     fig.tight_layout()
     plt.show(block=True)
